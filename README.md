@@ -18,14 +18,10 @@ window.webpackChunkdiscord_app.push([
   [Math.random()],
   {},
   req => {
-    for (const m of Object.keys(req.c)
-      .map(x => req.c[x].exports)
-      .filter(x => x)) {
+    for (const m of Object.keys(req.c).map(x => req.c[x].exports).filter(x => x)) {
       if (m.default && m.default.getToken !== undefined) {
-        return console.log("%c你的 Token 是: %c" + m.default.getToken(), "color:white;font-size:18px;", "color:red;font-size:18px;font-weight:bold;");
-      }
-      if (m.getToken !== undefined) {
-        return console.log("%c你的 Token 是: %c" + m.getToken(), "color:white;font-size:18px;", "color:red;font-size:18px;font-weight:bold;");
+        let t = m.default.getToken();
+        if (typeof t === 'string') return console.log(t);
       }
     }
   }
