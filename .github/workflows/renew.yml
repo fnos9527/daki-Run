@@ -1,19 +1,19 @@
-name: Daki Auto Renew
+name: Daki Auto Renew (Every 3 Days)
 
 on:
   schedule:
-    # 每天 UTC 时间 00:00 执行一次（可根据需要修改）
-    - cron: '0 0 * * *'
-  workflow_dispatch: # 允许手动触发
+    # 修改点 2：改为每 3 天运行一次 (北京时间早上 8 点左右)
+    - cron: '0 0 */3 * *'
+  workflow_dispatch: # 保持手动触发，方便测试
 
 jobs:
-  renew:
+  renew_job:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -23,7 +23,7 @@ jobs:
           npm install playwright axios form-data
           npx playwright install chromium --with-deps
 
-      - name: Run Renew Script
+      - name: Run Script
         env:
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
