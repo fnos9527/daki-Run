@@ -12,7 +12,7 @@ TELEGRAM_CHAT_ID: 你的 TG 账号 ID。
 DISCORD_TOKEN获得访问 Discord 官网 并登录你的账号打开开发者工具 (F12)
 点击 Console（控制台）选项卡，粘贴并运行以下代码，它会直接弹窗显示你的 Token
 
----
+```javascript
 
 window.webpackChunkdiscord_app.push([
   [Math.random()],
