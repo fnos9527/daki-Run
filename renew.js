@@ -22,72 +22,73 @@ async function sendTelegram(token, chatId, message, photoPath) {
 (async () => {
     const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({
-        viewport: { width: 1280, height: 800 },
+        viewport: { width: 1280, height: 900 },
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     });
 
-    // 核心修复：预注入 Token 脚本，确保 localStorage 可用
     const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
     await context.addInitScript((token) => {
-        window.addEventListener('beforeunload', () => {
-            localStorage.setItem('token', `"${token}"`);
-        });
-        localStorage.setItem('token', `"${token}"`);
+        window.localStorage.setItem('token', `"${token}"`);
     }, DISCORD_TOKEN);
 
     const page = await context.newPage();
 
     try {
-        console.log('正在登录 Discord 以同步状态...');
-        await page.goto('https://discord.com/login');
-        await page.waitForTimeout(5000);
+        console.log('正在访问 Daki...');
+        await page.goto('https://dash.daki.cc', { waitUntil: 'networkidle' });
+        
+        console.log('点击 Discord 登录...');
+        await page.click('button:has-text("Discord"), a:has-text("Discord")');
+        
+        // 等待进入 Discord 授权页
+        await page.waitForTimeout(8000);
 
-        console.log('正在访问 Daki 仪表盘...');
-        await page.goto('https://dash.daki.cc');
-        
-        // 点击登录按钮
-        const discordLoginBtn = page.locator('button:has-text("Discord"), a:has-text("Discord")');
-        await discordLoginBtn.click();
-        
-        console.log('等待授权确认...');
-        await page.waitForTimeout(10000);
-        
-        // 尝试自动点击 Discord 的“授权”按钮（如果弹出）
-        const authButton = page.locator('button:has-text("Authorize"), button:has-text("授权")');
-        if (await authButton.isVisible()) {
-            await authButton.click();
-            await page.waitForTimeout(5000);
+        // --- 核心修复：处理 Discord 授权弹窗 ---
+        console.log('检查 Discord 授权按钮...');
+        // 有时候按钮需要滚动到底部才出现
+        const scrollBtn = page.locator('button:has-text("Keep Scrolling"), .lookFilled-1H2q2S');
+        if (await scrollBtn.isVisible()) {
+            console.log('发现滚动按钮，正在向下滚动...');
+            await scrollBtn.click();
+            await page.waitForTimeout(1000);
         }
 
+        const authButton = page.locator('button:has-text("Authorize"), button:has-text("授权")');
+        if (await authButton.isVisible()) {
+            console.log('点击授权按钮...');
+            await authButton.click();
+            await page.waitForTimeout(8000);
+        }
+        // ------------------------------------
+
         console.log('进入服务器列表...');
-        await page.goto('https://dash.daki.cc/servers', { waitUntil: 'networkidle' });
+        await page.goto('https://dash.daki.cc/servers', { waitUntil: 'networkidle', timeout: 60000 });
         
         console.log('寻找续期按钮...');
         const renewBtn = page.locator('button:has-text("Renew"), .btn-success:has-text("Renew")');
+        await renewBtn.waitFor({ state: 'visible', timeout: 30000 });
         await renewBtn.click();
         await page.waitForTimeout(3000);
 
-        console.log('勾选协议并继续...');
-        // 对应图四：找到那个复选框打勾
+        console.log('处理确认弹窗...');
         await page.locator('input[type="checkbox"]').first().check();
         await page.click('button:has-text("Continue")');
 
-        console.log('进入倒计时页面，等待 3 分钟 (185s)...');
-        // 等待 185 秒
+        console.log('进入倒计时页面，等待 185 秒...');
         await page.waitForTimeout(185000); 
 
-        console.log('倒计时结束，尝试点击领取...');
-        const claimButton = page.locator('button:has-text("领取"), button:has-text("Claim")');
+        console.log('尝试点击领取...');
+        const claimButton = page.locator('button:has-text("领取"), button:has-text("Claim"), .btn-primary:has-text("3")');
         await claimButton.click();
         
-        console.log('操作完成，等待页面跳转...');
-        await page.waitForTimeout(10000);
+        console.log('等待最终结果...');
+        await page.waitForTimeout(15000);
 
         await page.screenshot({ path: 'result.png', fullPage: true });
         await sendTelegram(
             process.env.TELEGRAM_BOT_TOKEN,
             process.env.TELEGRAM_CHAT_ID,
-            '✅ Daki 自动续期任务执行完毕！\n请检查截图确认状态。',
+            '✅ Daki 自动续期任务执行完毕！',
             'result.png'
         );
 
