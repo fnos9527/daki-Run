@@ -9,20 +9,4 @@ TELEGRAM_BOT_TOKEN: 你的 TG 机器人 Token。
 TELEGRAM_CHAT_ID: 你的 TG 账号 ID。
 
 
-DISCORD_TOKEN获得访问 Discord 官网 并登录你的账号打开开发者工具 (F12)
-点击 Console（控制台）选项卡，粘贴并运行以下代码，它会直接弹窗显示你的 Token
-
-```javascript
-
-window.webpackChunkdiscord_app.push([
-  [Math.random()],
-  {},
-  req => {
-    for (const m of Object.keys(req.c).map(x => req.c[x].exports).filter(x => x)) {
-      if (m.default && m.default.getToken !== undefined) {
-        let t = m.default.getToken();
-        if (typeof t === 'string') return console.log(t);
-      }
-    }
-  }
-]);
+DISCORD_TOKEN 获得打开 Discord 网页版并登录按 F12 打开开发者工具点击顶部的 Network（网络） 选项卡点击任意一个请求（如 library 或 science），在右侧找到 Headers（标头）向下滚动找到 Request Headers，里面的 authorization 字段后面那一串长字符就是你的 Token。
