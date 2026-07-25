@@ -2,8 +2,8 @@ name: Daki Auto Renew (Every 3 Days)
 
 on:
   schedule:
-    # 修改点 2：改为每 3 天运行一次 (北京时间早上 8 点左右)
-    - cron: '0 0 */3 * *'
+    #  (北京时间早上 1 点左右)
+    - cron: '0 17 * * *'
   workflow_dispatch: # 保持手动触发，方便测试
 
 jobs:
