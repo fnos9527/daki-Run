@@ -6,8 +6,9 @@ const os = require('os');
 const path = require('path');
 
 const SITE = 'https://dash.daki.cc';
+const STATE_FILE = path.join(process.cwd(), '.state', 'daki-state.json');
 
-// Telegram 通知：有图发图，没图发文字
+// ---------------- Telegram 通知：有图发图，没图发文字 ----------------
 async function sendTelegram(token, chatId, message, photoPath) {
     if (!token || !chatId) {
         console.log('未配置 Telegram，跳过通知');
@@ -35,7 +36,7 @@ async function sendTelegram(token, chatId, message, photoPath) {
     }
 }
 
-// 是否停在 Cloudflare 验证页
+// ---------------- Cloudflare 验证 ----------------
 async function isChallenge(page) {
     try {
         const title = await page.title();
@@ -47,7 +48,6 @@ async function isChallenge(page) {
     }
 }
 
-// 等待 Cloudflare 验证通过，期间尝试点击 Turnstile 复选框
 async function waitCloudflare(page, timeoutMs = 75000) {
     const start = Date.now();
     let noted = false;
@@ -76,7 +76,6 @@ async function waitCloudflare(page, timeoutMs = 75000) {
     return false;
 }
 
-// 带重试的页面跳转：不等 networkidle，并处理 Cloudflare 验证
 async function gotoWithRetry(page, url, tries = 3) {
     let lastErr;
     for (let i = 1; i <= tries; i++) {
@@ -94,14 +93,142 @@ async function gotoWithRetry(page, url, tries = 3) {
     throw lastErr;
 }
 
+// ---------------- 登录状态：保存 / 恢复 ----------------
+function loadState() {
+    try {
+        if (fs.existsSync(STATE_FILE)) return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    } catch (e) {
+        console.log('读取登录状态失败，将重新登录:', e.message);
+    }
+    return null;
+}
+
+async function restoreState(context, state) {
+    try {
+        if (state.cookies && state.cookies.length) await context.addCookies(state.cookies);
+        const items = state.localStorage || {};
+        if (Object.keys(items).length) {
+            await context.addInitScript((data) => {
+                if (location.origin !== 'https://dash.daki.cc') return;
+                for (const [k, v] of Object.entries(data)) {
+                    try { if (localStorage.getItem(k) === null) localStorage.setItem(k, v); } catch (e) {}
+                }
+            }, items);
+        }
+        console.log(`已加载上次的登录状态 (cookie ${state.cookies ? state.cookies.length : 0} 个)`);
+    } catch (e) {
+        console.log('恢复登录状态失败:', e.message);
+    }
+}
+
+async function saveState(context, page) {
+    try {
+        // 只保存 daki.cc 的 cookie，不保存 Discord 的
+        const cookies = (await context.cookies()).filter((c) => /(^|\.)daki\.cc$/.test(c.domain));
+        let localStorageItems = {};
+        try {
+            if (new URL(page.url()).origin === SITE) {
+                localStorageItems = await page.evaluate(() => {
+                    const o = {};
+                    for (let i = 0; i < localStorage.length; i++) {
+                        const k = localStorage.key(i);
+                        o[k] = localStorage.getItem(k);
+                    }
+                    return o;
+                });
+            }
+        } catch (e) {}
+        // token 每次运行都会由 DISCORD_TOKEN 注入，不重复落盘
+        delete localStorageItems.token;
+
+        if (!cookies.length && !Object.keys(localStorageItems).length) {
+            console.log('没有可保存的登录状态');
+            return;
+        }
+        fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
+        fs.writeFileSync(
+            STATE_FILE,
+            JSON.stringify({ savedAt: new Date().toISOString(), cookies, localStorage: localStorageItems }),
+            { mode: 0o600 }
+        );
+        console.log(`登录状态已保存 (cookie ${cookies.length} 个)`);
+    } catch (e) {
+        console.log('保存登录状态失败:', e.message);
+    }
+}
+
+// ---------------- 登录判断 ----------------
+async function isLoggedIn(page) {
+    const loginBtn = page.locator('button:has-text("Discord"), a:has-text("Discord")').first();
+    const renewBtn = page.locator('button:has-text("Renew"), .btn-success:has-text("Renew")').first();
+    for (let i = 0; i < 20; i++) {
+        if (await renewBtn.isVisible().catch(() => false)) return true;
+        if (await loginBtn.isVisible().catch(() => false)) return false;
+        await page.waitForTimeout(1000);
+    }
+    return /\/servers/.test(page.url());
+}
+
+// ---------------- Discord 授权页：必须先滚到底，按钮才会激活 ----------------
+async function handleDiscordAuthorize(page) {
+    try {
+        await page.waitForURL((u) => u.hostname.includes('discord.com'), { timeout: 30000 });
+    } catch (e) {
+        console.log('未跳转到 Discord 授权页，可能已自动登录。');
+        return;
+    }
+    console.log('进入 Discord 授权页...');
+    await page.waitForLoadState('domcontentloaded').catch(() => {});
+
+    const authBtn = page.locator('button:has-text("Authorize"), button:has-text("授权")').first();
+    const scrollBtn = page.locator('button:has-text("Keep Scrolling"), button:has-text("继续滚动")').first();
+
+    for (let i = 0; i < 20; i++) {
+        if (!new URL(page.url()).hostname.includes('discord.com')) return; // 已经跳回
+        if ((await authBtn.isVisible().catch(() => false)) && (await authBtn.isEnabled().catch(() => false))) {
+            console.log('点击授权按钮...');
+            await authBtn.click();
+            return;
+        }
+        console.log('授权按钮未激活，向下滚动权限列表...');
+        // 把页面里所有可滚动容器都滚到底
+        await page.evaluate(() => {
+            document.querySelectorAll('*').forEach((el) => {
+                if (el.scrollHeight > el.clientHeight + 10 && /(auto|scroll)/.test(getComputedStyle(el).overflowY)) {
+                    el.scrollTop = el.scrollHeight;
+                }
+            });
+        }).catch(() => {});
+        await page.mouse.move(640, 420);
+        await page.mouse.wheel(0, 3000);
+        if (await scrollBtn.isVisible().catch(() => false)) {
+            await scrollBtn.click({ timeout: 2000 }).catch(() => {});
+        }
+        await page.waitForTimeout(1500);
+    }
+    throw new Error('Discord 授权按钮始终未激活');
+}
+
+async function loginViaDiscord(page) {
+    await gotoWithRetry(page, SITE);
+    console.log('点击 Discord 登录...');
+    const loginBtn = page.locator('button:has-text("Discord"), a:has-text("Discord")').first();
+    await loginBtn.waitFor({ state: 'visible', timeout: 60000 });
+    await loginBtn.click();
+
+    await handleDiscordAuthorize(page);
+
+    await page.waitForURL((u) => u.hostname === 'dash.daki.cc', { timeout: 90000 });
+    await waitCloudflare(page);
+}
+
+// ---------------- 主流程 ----------------
 (async () => {
     const launchOpts = {
-        channel: 'chrome',   // 真实 Chrome，比自带 Chromium 更不容易被识别
+        channel: 'chrome',   // 真实 Chrome
         headless: false,     // 有头模式，工作流里用 xvfb 提供虚拟屏幕
         viewport: null,
     };
-    // 工作流 "Setup optional VLESS node" 成功后会设置 IS_PROXY=true，
-    // 浏览器就走本机 sing-box 的 SOCKS5；否则直连
     if (process.env.IS_PROXY === 'true') {
         const proxyServer = process.env.PROXY_SERVER || 'socks5://127.0.0.1:1080';
         launchOpts.proxy = { server: proxyServer };
@@ -115,9 +242,8 @@ async function gotoWithRetry(page, url, tries = 3) {
     context.setDefaultTimeout(60000);
     context.setDefaultNavigationTimeout(90000);
 
+    // 兜底登录方式：注入 Discord Token
     const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
-
-    // 在所有页面导航前注入 Token
     await context.addInitScript((token) => {
         try { localStorage.setItem('token', `"${token}"`); } catch (e) {}
     }, DISCORD_TOKEN);
@@ -126,37 +252,30 @@ async function gotoWithRetry(page, url, tries = 3) {
     let failed = false;
 
     try {
-        console.log('正在访问 Daki...');
-        await gotoWithRetry(page, SITE);
-
-        console.log('点击 Discord 登录...');
-        const loginBtn = page.locator('button:has-text("Discord"), a:has-text("Discord")').first();
-        await loginBtn.waitFor({ state: 'visible', timeout: 60000 });
-        await loginBtn.click();
-
-        console.log('检查 Discord 授权状态...');
-        try {
-            const authButton = page.locator('button:has-text("Authorize"), button:has-text("授权")').first();
-            await authButton.waitFor({ state: 'visible', timeout: 30000 });
-
-            const scrollBtn = page.locator('button:has-text("Keep Scrolling")');
-            if (await scrollBtn.isVisible()) {
-                console.log('发现滚动按钮，正在向下滚动...');
-                await scrollBtn.click();
-                await page.waitForTimeout(1000);
-            }
-
-            console.log('点击授权按钮...');
-            await authButton.click();
-        } catch (e) {
-            console.log('未检测到授权按钮，可能已自动登录。');
+        // 1) 优先用上次保存的登录状态
+        let loggedIn = false;
+        const state = loadState();
+        if (state) {
+            await restoreState(context, state);
+            console.log('尝试使用已保存的登录状态...');
+            await gotoWithRetry(page, `${SITE}/servers`);
+            loggedIn = await isLoggedIn(page);
+            console.log(loggedIn ? '登录状态有效，跳过 Discord 登录' : '登录状态已失效，改用 Discord 登录');
+        } else {
+            console.log('没有已保存的登录状态，使用 Discord 登录');
         }
 
-        await page.waitForURL('**/dash.daki.cc/**', { timeout: 90000 });
-        await waitCloudflare(page);
+        // 2) 失效或没有，走完整 Discord 登录
+        if (!loggedIn) {
+            await loginViaDiscord(page);
+            console.log('进入服务器列表...');
+            await gotoWithRetry(page, `${SITE}/servers`);
+            loggedIn = await isLoggedIn(page);
+            if (!loggedIn) throw new Error('Discord 登录后仍未进入已登录状态');
+        }
 
-        console.log('进入服务器列表...');
-        await gotoWithRetry(page, `${SITE}/servers`);
+        // 登录成功立刻保存，后面续期即使失败也不会丢
+        await saveState(context, page);
 
         console.log('寻找续期按钮...');
         const renewBtn = page.locator('button:has-text("Renew"), .btn-success:has-text("Renew")').first();
@@ -179,6 +298,7 @@ async function gotoWithRetry(page, url, tries = 3) {
         console.log('等待最终结果...');
         await page.waitForTimeout(15000);
         await page.screenshot({ path: 'result.png', fullPage: true });
+        await saveState(context, page); // 刷新一次保存的状态
 
         await sendTelegram(
             process.env.TELEGRAM_BOT_TOKEN,
@@ -201,6 +321,5 @@ async function gotoWithRetry(page, url, tries = 3) {
         fs.rmSync(userDataDir, { recursive: true, force: true });
     }
 
-    // 失败时让 Actions 显示红叉，而不是假装成功
     if (failed) process.exit(1);
 })();
