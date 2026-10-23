@@ -88,12 +88,27 @@ jobs:
           echo "IS_PROXY=true" >> "$GITHUB_ENV"
           echo "PROXY_SERVER=socks5://127.0.0.1:$PROXY_PORT" >> "$GITHUB_ENV"
 
+      - name: Restore login state
+        uses: actions/cache/restore@v4
+        with:
+          path: .state
+          key: daki-state-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            daki-state-
+
       - name: Run Script
         env:
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: xvfb-run -a --server-args="-screen 0 1280x900x24" node renew.js
+
+      - name: Save login state
+        if: always() && hashFiles('.state/daki-state.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .state
+          key: daki-state-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Cleanup proxy
         if: always()
