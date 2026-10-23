@@ -162,15 +162,17 @@ async function saveState(context, page) {
 }
 
 // ---------------- 登录判断 ----------------
+// 控制台里的 Renew 是链接(<a>)而不是 <button>，且页面上始终有 Discord 图标链接，
+// 所以不再用"有没有 Discord 按钮"判断，只看是否出现已登录控制台的特征
 async function isLoggedIn(page) {
-    const loginBtn = page.locator('button:has-text("Discord"), a:has-text("Discord")').first();
-    const renewBtn = page.locator('button:has-text("Renew"), .btn-success:has-text("Renew")').first();
+    const renewBtn = page.locator('button:has-text("Renew"), a:has-text("Renew")').first();
     for (let i = 0; i < 30; i++) {
         if (await renewBtn.isVisible().catch(() => false)) return true;
-        if (await loginBtn.isVisible().catch(() => false)) return false;
+        const txt = await page.evaluate(() => (document.body ? document.body.innerText : '')).catch(() => '');
+        if (/Free Tier Dashboard|Good (morning|afternoon|evening|night),|My servers|Renewals today/i.test(txt)) return true;
         await page.waitForTimeout(1000);
     }
-    return /\/servers/.test(page.url());
+    return false;
 }
 
 // ---------------- 打开续期确认弹窗 ----------------
