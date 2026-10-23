@@ -232,21 +232,26 @@ async function confirmHeadsUp(page) {
 async function claimRenewal(page) {
     console.log('等待倒计时结束...');
     const claim = page.locator('button:has-text("Claim"), a:has-text("Claim"), button:has-text("领取")').first();
-    await claim.waitFor({ state: 'visible', timeout: 60000 });
 
-    // 以页面出现 "Timer complete" 为准，不再死等固定秒数；最多 6 分钟
+    // 倒计时期间页面上没有 Claim 按钮，计时结束才出现；以 "Timer complete" 或按钮出现为准，最多 6 分钟
     const start = Date.now();
     let lastLog = 0;
+    let done = false;
     while (Date.now() - start < 360000) {
+        if (await claim.isVisible().catch(() => false)) { done = true; break; }
         const txt = await page.evaluate(() => (document.body ? document.body.innerText : '')).catch(() => '');
-        if (/Timer complete/i.test(txt)) { console.log('倒计时已结束'); break; }
-        if (Date.now() - lastLog > 30000) {
-            console.log(`  仍在倒计时... 已等待 ${Math.round((Date.now() - start) / 1000)} 秒`);
+        if (/Timer complete/i.test(txt)) { done = true; break; }
+        if (Date.now() - lastLog > 20000) {
+            const m = txt.match(/(\d+:\d{2})\s*remaining/i);
+            console.log(`  倒计时中... 页面剩余 ${m ? m[1] : '未知'}，已等待 ${Math.round((Date.now() - start) / 1000)} 秒`);
             lastLog = Date.now();
         }
         await page.waitForTimeout(3000);
     }
+    if (!done) throw new Error('等待 6 分钟仍未出现 Claim 按钮');
+    console.log('倒计时已结束');
 
+    await claim.waitFor({ state: 'visible', timeout: 30000 });
     console.log('尝试点击领取...');
     try {
         await claim.click({ timeout: 8000 });
