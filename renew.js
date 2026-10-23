@@ -1,7 +1,9 @@
-const { chromium } = require('playwright');
+const { chromium } = require('patchright');
 const axios = require('axios');
 const FormData = require('form-data');
 const fs = require('fs');
+const os = require('os');
+const path = require('path');
 
 const SITE = 'https://dash.daki.cc';
 
@@ -33,19 +35,60 @@ async function sendTelegram(token, chatId, message, photoPath) {
     }
 }
 
-// 带重试的页面跳转：不再等 networkidle（后台长连接/统计脚本会让它永远不"空闲"）
+// 是否停在 Cloudflare 验证页
+async function isChallenge(page) {
+    try {
+        const title = await page.title();
+        if (/just a moment|attention required|请稍候|security verification/i.test(title)) return true;
+        const txt = await page.evaluate(() => (document.body ? document.body.innerText.slice(0, 800) : ''));
+        return /Performing security verification|Verify you are human|Checking your browser|正在验证|执行安全验证/i.test(txt);
+    } catch (e) {
+        return true; // 页面正在跳转，视为尚未通过
+    }
+}
+
+// 等待 Cloudflare 验证通过，期间尝试点击 Turnstile 复选框
+async function waitCloudflare(page, timeoutMs = 75000) {
+    const start = Date.now();
+    let noted = false;
+    let lastClick = 0;
+    while (Date.now() - start < timeoutMs) {
+        if (!(await isChallenge(page))) {
+            if (noted) console.log('Cloudflare 验证已通过');
+            return true;
+        }
+        if (!noted) { console.log('检测到 Cloudflare 验证，等待通过...'); noted = true; }
+        if (Date.now() - lastClick > 8000) {
+            try {
+                const frame = page.locator('iframe[src*="challenges.cloudflare.com"]').first();
+                if (await frame.count()) {
+                    const box = await frame.boundingBox();
+                    if (box) {
+                        await page.mouse.move(box.x + 28, box.y + box.height / 2, { steps: 12 });
+                        await page.mouse.click(box.x + 28, box.y + box.height / 2);
+                        lastClick = Date.now();
+                    }
+                }
+            } catch (e) {}
+        }
+        await page.waitForTimeout(3000);
+    }
+    return false;
+}
+
+// 带重试的页面跳转：不等 networkidle，并处理 Cloudflare 验证
 async function gotoWithRetry(page, url, tries = 3) {
     let lastErr;
     for (let i = 1; i <= tries; i++) {
         try {
             console.log(`访问 ${url} (第 ${i}/${tries} 次)`);
             await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 90000 });
-            await page.waitForLoadState('load', { timeout: 30000 }).catch(() => {});
+            if (!(await waitCloudflare(page))) throw new Error('Cloudflare 验证未通过');
             return;
         } catch (e) {
             lastErr = e;
             console.log(`第 ${i} 次访问失败: ${e.message.split('\n')[0]}`);
-            if (i < tries) await page.waitForTimeout(10000 * i);
+            if (i < tries) await page.waitForTimeout(8000 * i);
         }
     }
     throw lastErr;
@@ -53,8 +96,9 @@ async function gotoWithRetry(page, url, tries = 3) {
 
 (async () => {
     const launchOpts = {
-        headless: true,
-        args: ['--no-sandbox', '--disable-blink-features=AutomationControlled'],
+        channel: 'chrome',   // 真实 Chrome，比自带 Chromium 更不容易被识别
+        headless: false,     // 有头模式，工作流里用 xvfb 提供虚拟屏幕
+        viewport: null,
     };
     // 工作流 "Setup optional VLESS node" 成功后会设置 IS_PROXY=true，
     // 浏览器就走本机 sing-box 的 SOCKS5；否则直连
@@ -66,11 +110,8 @@ async function gotoWithRetry(page, url, tries = 3) {
         console.log('浏览器直连（未启用代理）');
     }
 
-    const browser = await chromium.launch(launchOpts);
-    const context = await browser.newContext({
-        viewport: { width: 1280, height: 900 },
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    });
+    const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chrome-'));
+    const context = await chromium.launchPersistentContext(userDataDir, launchOpts);
     context.setDefaultTimeout(60000);
     context.setDefaultNavigationTimeout(90000);
 
@@ -81,7 +122,7 @@ async function gotoWithRetry(page, url, tries = 3) {
         try { localStorage.setItem('token', `"${token}"`); } catch (e) {}
     }, DISCORD_TOKEN);
 
-    const page = await context.newPage();
+    const page = context.pages()[0] || (await context.newPage());
     let failed = false;
 
     try {
@@ -112,6 +153,7 @@ async function gotoWithRetry(page, url, tries = 3) {
         }
 
         await page.waitForURL('**/dash.daki.cc/**', { timeout: 90000 });
+        await waitCloudflare(page);
 
         console.log('进入服务器列表...');
         await gotoWithRetry(page, `${SITE}/servers`);
@@ -155,7 +197,8 @@ async function gotoWithRetry(page, url, tries = 3) {
             'error.png'
         );
     } finally {
-        await browser.close();
+        await context.close().catch(() => {});
+        fs.rmSync(userDataDir, { recursive: true, force: true });
     }
 
     // 失败时让 Actions 显示红叉，而不是假装成功
