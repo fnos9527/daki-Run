@@ -9,7 +9,7 @@ on:
 jobs:
   renew_job:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -21,8 +21,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          npm install playwright axios form-data
-          npx playwright install chromium --with-deps
+          npm install patchright axios form-data
+          npx patchright install chrome --with-deps
+          sudo apt-get install -y xvfb
 
       - name: Setup optional VLESS node
         env:
@@ -92,7 +93,7 @@ jobs:
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: node renew.js
+        run: xvfb-run -a --server-args="-screen 0 1280x900x24" node renew.js
 
       - name: Cleanup proxy
         if: always()
