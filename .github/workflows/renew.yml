@@ -1,14 +1,15 @@
-name: Daki Auto Renew (Every 3 Days)
+name: Daki Auto Renew
 
 on:
   schedule:
-    #  (北京时间早上 1 点左右)
+    # 17:00 UTC = 北京时间凌晨 1 点
     - cron: '0 17 * * *'
-  workflow_dispatch: # 保持手动触发，方便测试
+  workflow_dispatch: # 手动触发，方便测试
 
 jobs:
   renew_job:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,9 +24,79 @@ jobs:
           npm install playwright axios form-data
           npx playwright install chromium --with-deps
 
+      - name: Setup optional VLESS node
+        env:
+          NODE_LINK: ${{ secrets.NODE_LINK }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          PROXY_PORT=1080
+          WORK="$RUNNER_TEMP/singbox"
+          mkdir -p "$WORK"
+
+          if [ -z "$NODE_LINK" ]; then
+            echo "未配置 NODE_LINK，全程直连"
+            echo "IS_PROXY=false" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          fail() {
+            echo "::warning::$1，回退为直连"
+            [ -f "$WORK/sb.pid" ] && kill "$(cat "$WORK/sb.pid")" 2>/dev/null
+            echo "IS_PROXY=false" >> "$GITHUB_ENV"
+            exit 0
+          }
+
+          # 1) 生成 sing-box 配置（按 ws / tcp / grpc / http 自动适配）
+          PROXY_PORT=$PROXY_PORT node vless2singbox.js "$WORK/config.json" || fail "NODE_LINK 解析失败"
+
+          # 2) 下载 sing-box（最新版 linux-amd64）
+          TAG=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
+          [ -n "$TAG" ] && [ "$TAG" != "null" ] || fail "获取 sing-box 版本失败"
+          VER="${TAG#v}"
+          curl -fsSL -o "$WORK/sb.tar.gz" \
+            "https://github.com/SagerNet/sing-box/releases/download/${TAG}/sing-box-${VER}-linux-amd64.tar.gz" \
+            || fail "下载 sing-box 失败"
+          tar -xzf "$WORK/sb.tar.gz" -C "$WORK" || fail "解压 sing-box 失败"
+          SB=$(find "$WORK" -type f -name sing-box | head -n1)
+          [ -x "$SB" ] || fail "未找到 sing-box 可执行文件"
+
+          # 3) 启动
+          "$SB" check -c "$WORK/config.json" || fail "sing-box 配置校验未通过"
+          nohup "$SB" run -c "$WORK/config.json" > "$WORK/sb.log" 2>&1 &
+          echo $! > "$WORK/sb.pid"
+
+          # 4) 等待端口就绪并测试出口
+          OK=false
+          for i in $(seq 1 15); do
+            sleep 1
+            if curl -s -o /dev/null --max-time 8 --socks5-hostname 127.0.0.1:$PROXY_PORT \
+                 https://www.cloudflare.com/cdn-cgi/trace; then
+              OK=true; break
+            fi
+          done
+          if [ "$OK" != "true" ]; then
+            echo "--- sing-box 日志 ---"; tail -n 20 "$WORK/sb.log"
+            fail "代理连通性测试失败"
+          fi
+
+          echo "代理就绪，出口 IP 信息："
+          curl -s --max-time 8 --socks5-hostname 127.0.0.1:$PROXY_PORT \
+            https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(ip|loc)='
+          echo "IS_PROXY=true" >> "$GITHUB_ENV"
+          echo "PROXY_SERVER=socks5://127.0.0.1:$PROXY_PORT" >> "$GITHUB_ENV"
+
       - name: Run Script
         env:
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: node renew.js
+
+      - name: Cleanup proxy
+        if: always()
+        run: |
+          pkill -9 -x sing-box 2>/dev/null || true
+          rm -rf "$RUNNER_TEMP/singbox"
+          echo "代理进程与配置文件已清理"
