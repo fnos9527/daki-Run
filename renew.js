@@ -108,12 +108,13 @@ async function restoreState(context, state) {
         if (state.cookies && state.cookies.length) await context.addCookies(state.cookies);
         const items = state.localStorage || {};
         if (Object.keys(items).length) {
-            await context.addInitScript((data) => {
-                if (location.origin !== 'https://dash.daki.cc') return;
+            const origin = state.origin || SITE;
+            await context.addInitScript(({ data, origin }) => {
+                if (location.origin !== origin) return;
                 for (const [k, v] of Object.entries(data)) {
                     try { if (localStorage.getItem(k) === null) localStorage.setItem(k, v); } catch (e) {}
                 }
-            }, items);
+            }, { data: items, origin });
         }
         console.log(`已加载上次的登录状态 (cookie ${state.cookies ? state.cookies.length : 0} 个)`);
     } catch (e) {
@@ -126,8 +127,11 @@ async function saveState(context, page) {
         // 只保存 daki.cc 的 cookie，不保存 Discord 的
         const cookies = (await context.cookies()).filter((c) => /(^|\.)daki\.cc$/.test(c.domain));
         let localStorageItems = {};
+        let origin = SITE;
         try {
-            if (new URL(page.url()).origin === SITE) {
+            const u = new URL(page.url());
+            if (/(^|\.)daki\.cc$/.test(u.hostname)) {
+                origin = u.origin;
                 localStorageItems = await page.evaluate(() => {
                     const o = {};
                     for (let i = 0; i < localStorage.length; i++) {
@@ -148,7 +152,7 @@ async function saveState(context, page) {
         fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
         fs.writeFileSync(
             STATE_FILE,
-            JSON.stringify({ savedAt: new Date().toISOString(), cookies, localStorage: localStorageItems }),
+            JSON.stringify({ savedAt: new Date().toISOString(), origin, cookies, localStorage: localStorageItems }),
             { mode: 0o600 }
         );
         console.log(`登录状态已保存 (cookie ${cookies.length} 个)`);
@@ -161,12 +165,93 @@ async function saveState(context, page) {
 async function isLoggedIn(page) {
     const loginBtn = page.locator('button:has-text("Discord"), a:has-text("Discord")').first();
     const renewBtn = page.locator('button:has-text("Renew"), .btn-success:has-text("Renew")').first();
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 30; i++) {
         if (await renewBtn.isVisible().catch(() => false)) return true;
         if (await loginBtn.isVisible().catch(() => false)) return false;
         await page.waitForTimeout(1000);
     }
     return /\/servers/.test(page.url());
+}
+
+// ---------------- 打开续期确认弹窗 ----------------
+async function openRenewDialog(page) {
+    console.log('寻找续期按钮...');
+    // 控制台是单页应用，点侧边栏 Servers 即可，不再硬编码域名
+    const nav = page.locator('a:has-text("Servers")').first();
+    if (await nav.isVisible().catch(() => false)) {
+        await nav.click().catch(() => {});
+        await page.waitForTimeout(3000);
+    }
+    const renewBtns = page.locator('button:has-text("Renew"), a:has-text("Renew"), .btn-success:has-text("Renew")');
+    await renewBtns.first().waitFor({ state: 'visible', timeout: 60000 });
+    const n = await renewBtns.count();
+    for (let i = 0; i < n; i++) {
+        const b = renewBtns.nth(i);
+        if (!(await b.isVisible().catch(() => false))) continue;
+        await b.click().catch(() => {});
+        try {
+            await page.waitForURL((u) => /heads-up|\/renew/.test(u.pathname), { timeout: 12000 });
+            console.log('已进入续期流程页:', page.url());
+            return;
+        } catch (e) {
+            console.log(`第 ${i + 1} 个续期按钮没有弹出确认框，尝试下一个`);
+        }
+    }
+    throw new Error('点击续期按钮后没有进入续期流程页');
+}
+
+// ---------------- heads-up 确认页：勾选 + Continue to the renewal ----------------
+async function confirmHeadsUp(page) {
+    if (!/heads-up/.test(page.url())) {
+        console.log('未出现 heads-up 确认页，当前地址:', page.url());
+        return;
+    }
+    console.log('处理 heads-up 确认页...');
+    const checkbox = page.locator('input[type="checkbox"]').first();
+    try {
+        await checkbox.check({ timeout: 8000 });
+    } catch (e) {
+        console.log('直接勾选失败，改为点击说明文字勾选');
+        await page.getByText(/I understand that the ads/i).first().click();
+    }
+    const cont = page.locator('button:has-text("Continue"), a:has-text("Continue")').first();
+    await cont.waitFor({ state: 'visible', timeout: 30000 });
+    for (let i = 0; i < 15; i++) {          // 勾选后按钮才会可点
+        if (await cont.isEnabled().catch(() => false)) break;
+        await page.waitForTimeout(1000);
+    }
+    await cont.click();
+    console.log('已点击 Continue to the renewal');
+    // 页面说明里提到可能先出现一段视频广告，这里最多等 90 秒进入真正的续期页
+    await page.waitForURL((u) => /\/servers\/[^/]+\/renew/.test(u.pathname), { timeout: 90000 });
+    console.log('已进入续期倒计时页:', page.url());
+}
+
+async function claimRenewal(page) {
+    console.log('等待倒计时结束...');
+    const claim = page.locator('button:has-text("Claim"), a:has-text("Claim"), button:has-text("领取")').first();
+    await claim.waitFor({ state: 'visible', timeout: 60000 });
+
+    // 以页面出现 "Timer complete" 为准，不再死等固定秒数；最多 6 分钟
+    const start = Date.now();
+    let lastLog = 0;
+    while (Date.now() - start < 360000) {
+        const txt = await page.evaluate(() => (document.body ? document.body.innerText : '')).catch(() => '');
+        if (/Timer complete/i.test(txt)) { console.log('倒计时已结束'); break; }
+        if (Date.now() - lastLog > 30000) {
+            console.log(`  仍在倒计时... 已等待 ${Math.round((Date.now() - start) / 1000)} 秒`);
+            lastLog = Date.now();
+        }
+        await page.waitForTimeout(3000);
+    }
+
+    console.log('尝试点击领取...');
+    try {
+        await claim.click({ timeout: 8000 });
+    } catch (e) {
+        console.log('常规点击失败（可能被广告遮挡），改用脚本点击');
+        await claim.evaluate((el) => el.click());
+    }
 }
 
 // ---------------- Discord 授权页：必须先滚到底，按钮才会激活 ----------------
@@ -218,7 +303,9 @@ async function loginViaDiscord(page) {
 
     await handleDiscordAuthorize(page);
 
-    await page.waitForURL((u) => u.hostname === 'dash.daki.cc', { timeout: 90000 });
+    // 授权后会跳回 daki.cc 下的控制台（实际落在 free.daki.cc），不限定具体子域名
+    await page.waitForURL((u) => /(^|\.)daki\.cc$/.test(u.hostname), { timeout: 90000 });
+    await page.waitForLoadState('load', { timeout: 30000 }).catch(() => {});
     await waitCloudflare(page);
 }
 
@@ -258,42 +345,28 @@ async function loginViaDiscord(page) {
         if (state) {
             await restoreState(context, state);
             console.log('尝试使用已保存的登录状态...');
-            await gotoWithRetry(page, `${SITE}/servers`);
+            await gotoWithRetry(page, `${state.origin || SITE}/`);
             loggedIn = await isLoggedIn(page);
             console.log(loggedIn ? '登录状态有效，跳过 Discord 登录' : '登录状态已失效，改用 Discord 登录');
         } else {
             console.log('没有已保存的登录状态，使用 Discord 登录');
         }
 
-        // 2) 失效或没有，走完整 Discord 登录
         if (!loggedIn) {
             await loginViaDiscord(page);
-            console.log('进入服务器列表...');
-            await gotoWithRetry(page, `${SITE}/servers`);
             loggedIn = await isLoggedIn(page);
-            if (!loggedIn) throw new Error('Discord 登录后仍未进入已登录状态');
+            if (!loggedIn) throw new Error('Discord 授权后仍未进入已登录状态');
         }
+        console.log('已进入控制台:', page.url());
 
         // 登录成功立刻保存，后面续期即使失败也不会丢
         await saveState(context, page);
 
-        console.log('寻找续期按钮...');
-        const renewBtn = page.locator('button:has-text("Renew"), .btn-success:has-text("Renew")').first();
-        await renewBtn.waitFor({ state: 'visible', timeout: 60000 });
-        await renewBtn.click();
-        await page.waitForTimeout(3000);
+        await openRenewDialog(page);
+        await page.waitForTimeout(1000);
 
-        console.log('处理确认弹窗...');
-        await page.locator('input[type="checkbox"]').first().check();
-        await page.click('button:has-text("Continue")');
-
-        console.log('进入倒计时页面，等待 185 秒...');
-        await page.waitForTimeout(185000);
-
-        console.log('尝试点击领取...');
-        const claimButton = page.locator('button:has-text("领取"), button:has-text("Claim"), .btn-primary:has-text("3")').first();
-        await claimButton.waitFor({ state: 'visible', timeout: 30000 });
-        await claimButton.click();
+        await confirmHeadsUp(page);
+        await claimRenewal(page);
 
         console.log('等待最终结果...');
         await page.waitForTimeout(15000);
@@ -313,7 +386,7 @@ async function loginViaDiscord(page) {
         await sendTelegram(
             process.env.TELEGRAM_BOT_TOKEN,
             process.env.TELEGRAM_CHAT_ID,
-            `❌ Daki 续期失败: ${String(err.message).split('\n')[0]}`,
+            `❌ Daki 续期失败: ${String(err.message).split('\n')[0]}\n页面: ${page.url()}`,
             'error.png'
         );
     } finally {
